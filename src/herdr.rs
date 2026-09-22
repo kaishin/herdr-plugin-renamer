@@ -182,6 +182,28 @@ pub fn workspace_report_task(workspace_id: &str, task: &str) -> bool {
     report_task_metadata("workspace", workspace_id, task)
 }
 
+/// Set the natural-language visible name for the agent that hosts this pane.
+/// The system agent name stays as whatever `agent rename` set (kebab-case to
+/// satisfy herdr's `agent_name` regex); the Agent sidebar reads the display
+/// agent instead, so users see the friendly label there. Metadata reporting
+/// is display-only and fail-open; a failure here does not block the persistent
+/// rename workflow.
+pub fn pane_report_display_agent(pane_id: &str, label: &str) -> bool {
+    Command::new(herdr_bin())
+        .args([
+            "pane",
+            "report-metadata",
+            pane_id,
+            "--source",
+            METADATA_SOURCE,
+            "--display-agent",
+            label,
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 fn report_task_metadata(resource: &str, resource_id: &str, task: &str) -> bool {
     let token = format!("task={task}");
     Command::new(herdr_bin())

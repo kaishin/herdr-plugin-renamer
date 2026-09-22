@@ -217,24 +217,32 @@ fn cold_phase() {
     }
     if targets.iter().any(|t| t == "agent") {
         // herdr rejects a manual agent name another agent already holds, so
-        // retry once with a pane-derived suffix before giving up.
-        let mut ok = herdr::agent_rename(&pane_id, &name);
+        // retry once with a pane-derived suffix before giving up. The system
+        // name has to be the kebab slug: herdr's agent-name regex forbids
+        // spaces and uppercase letters, and the natural-language label would
+        // be rejected by `agent rename`. The friendly label still reaches the
+        // Agent sidebar via `--display-agent` below.
+        let mut ok = herdr::agent_rename(&pane_id, &slug);
         if !ok {
-            let alt = format!("{name}-{}", pane_suffix(&pane_id));
+            let alt = format!("{slug}-{}", pane_suffix(&pane_id));
             ok = herdr::agent_rename(&pane_id, &alt);
             debug_log(&format!("cold: agent {pane_id} -> {alt} ok={ok} (retry)"));
         } else {
-            debug_log(&format!("cold: agent {pane_id} -> {name} ok={ok}"));
+            debug_log(&format!("cold: agent {pane_id} -> {slug} ok={ok}"));
         }
     }
 
     // Publish the same task name as display metadata so users can place `$task`
-    // in custom Agent and Space sidebar rows. Metadata failures do not affect
-    // the persistent pane, branch, or workspace renames.
+    // in custom Agent and Space sidebar rows, and set the natural-language
+    // visible agent name so the Agent sidebar shows the friendly phrase rather
+    // than the kebab system name. Metadata failures do not affect the
+    // persistent pane, branch, or workspace renames.
     let pane_metadata_ok = herdr::pane_report_task(&pane_id, &name);
     let workspace_metadata_ok = herdr::workspace_report_task(&workspace_id, &name);
+    let display_agent_ok = herdr::pane_report_display_agent(&pane_id, &name);
     debug_log(&format!(
-        "cold: task metadata pane={pane_metadata_ok} workspace={workspace_metadata_ok}"
+        "cold: task metadata pane={pane_metadata_ok} workspace={workspace_metadata_ok} \
+         display_agent={display_agent_ok}"
     ));
 
     // Safety re-check: only rename a branch still on the auto `worktree/` name.
@@ -274,44 +282,39 @@ fn cold_phase() {
 
 /// Walk the engine chain selected by the `HERDR_NAMING_ENGINE` env var (or an
 /// `engine` file in the per-plugin config dir), returning the first
-/// `(label name, branch slug)` an engine produces. Under the `zh` style the
-/// CLI engines return a Chinese label plus an ASCII slug; the on-device
-/// Foundation engine only produces ASCII slugs, which are used for both.
+/// `(label, branch slug)` an engine produces. CLI engines return a Title
+/// Case English label plus an ASCII kebab slug; the on-device Foundation
+/// engine only produces ASCII slugs and the caller Title Cases them.
 /// `None` means every engine in the chain failed (so the caller uses the
 /// deterministic local fallbacks).
 fn generate_name(prompt: &str, out_file: &Path) -> Option<(String, String)> {
     let selection = env::var("HERDR_NAMING_ENGINE")
         .ok()
         .or_else(|| read_config_knob("engine"));
-    let style = env::var("HERDR_NAMING_STYLE")
-        .ok()
-        .or_else(|| read_config_knob("style"))
-        .unwrap_or_default();
-    let instruction = slug::engine_instruction(&style, prompt);
+    let instruction = slug::engine_instruction(prompt);
     for eng in engine::engine_chain(selection.as_deref()) {
         let result = match eng {
             #[cfg(target_os = "macos")]
-            engine::Engine::Foundation => {
-                foundation::generate_slug(prompt).map(|slug| (slug.clone(), slug))
-            }
+            engine::Engine::Foundation => foundation::generate_slug(prompt).map(|slug| {
+                // Foundation only produces ASCII slugs. Derive a friendly
+                // Title Case label from the slug so the display agent and
+                // tab both carry a human-readable name.
+                let label = slug::title_case(&slug);
+                (label, slug)
+            }),
             engine::Engine::Codex => codex::generate(&instruction, out_file)
-                .and_then(|raw| slug::parse_engine_output(&style, &raw, prompt)),
-            engine::Engine::Pi => generate_from_models(
-                "Pi",
-                pi::models(),
-                |model| pi::generate(&instruction, model),
-                &style,
-                prompt,
-            ),
-            engine::Engine::Opencode => generate_from_models(
-                "Opencode",
-                opencode::models(),
-                |model| opencode::generate(&instruction, model),
-                &style,
-                prompt,
-            ),
-            engine::Engine::Claude => claude::generate(&instruction)
-                .and_then(|raw| slug::parse_engine_output(&style, &raw, prompt)),
+                .and_then(|raw| slug::parse_engine_output(&raw)),
+            engine::Engine::Pi => generate_from_models("Pi", pi::models(), |model| {
+                pi::generate(&instruction, model)
+            }),
+            engine::Engine::Opencode => {
+                generate_from_models("Opencode", opencode::models(), |model| {
+                    opencode::generate(&instruction, model)
+                })
+            }
+            engine::Engine::Claude => {
+                claude::generate(&instruction).and_then(|raw| slug::parse_engine_output(&raw))
+            }
         };
         match result {
             Some((name, slug)) => {
@@ -328,14 +331,12 @@ fn generate_from_models<F>(
     engine: &str,
     models: Vec<String>,
     mut generate: F,
-    style: &str,
-    prompt: &str,
 ) -> Option<(String, String)>
 where
     F: FnMut(&str) -> Option<String>,
 {
     for model in models {
-        match generate(&model).and_then(|raw| slug::parse_engine_output(style, &raw, prompt)) {
+        match generate(&model).and_then(|raw| slug::parse_engine_output(&raw)) {
             Some(result) => {
                 debug_log(&format!("cold: {engine} model={model} succeeded"));
                 return Some(result);
@@ -573,25 +574,25 @@ mod tests {
     fn model_fallback_continues_after_invalid_output() {
         let models = vec!["bad-model".to_string(), "good-model".to_string()];
         let mut attempted = Vec::new();
-        let result = generate_from_models(
-            "test",
-            models,
-            |model| {
-                attempted.push(model.to_string());
-                match model {
-                    "bad-model" => Some("not a valid Chinese title".to_string()),
-                    "good-model" => Some("修复标题命名\nfix-title-naming".to_string()),
-                    _ => None,
-                }
-            },
-            "zh",
-            "修复 Herdr 标题自动命名",
-        );
+        let result = generate_from_models("test", models, |model| {
+            attempted.push(model.to_string());
+            match model {
+                // Digit-noise fails `is_good_slug`; single-line legacy
+                // path also fails because the slug Title Cases to digit
+                // noise that `is_good_en_name` rejects.
+                "bad-model" => Some("1-2-3-h1-yoy".to_string()),
+                "good-model" => Some("Fix Title Naming\nfix-title-naming".to_string()),
+                _ => None,
+            }
+        });
 
         assert_eq!(attempted, vec!["bad-model", "good-model"]);
         assert_eq!(
             result,
-            Some(("修复标题命名".to_string(), "fix-title-naming".to_string()))
+            Some((
+                "Fix Title Naming".to_string(),
+                "fix-title-naming".to_string()
+            ))
         );
     }
 

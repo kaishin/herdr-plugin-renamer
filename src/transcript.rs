@@ -606,14 +606,14 @@ mod tests {
             "\n",
             r#"{"type":"model_change","id":"a","parentId":null,"provider":"Temp","modelId":"m"}"#,
             "\n",
-            r#"{"type":"message","id":"b","message":{"role":"user","content":[{"type":"text","text":"调研一下 pi 的插件生态"}]}}"#,
+            r#"{"type":"message","id":"b","message":{"role":"user","content":[{"type":"text","text":"Fix the pi plugin loader"}]}}"#,
             "\n",
-            r#"{"type":"message","id":"c","message":{"role":"assistant","content":[{"type":"text","text":"好的"}]}}"#,
+            r#"{"type":"message","id":"c","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}"#,
             "\n",
         );
         assert_eq!(
             first_prompt("pi", jsonl).as_deref(),
-            Some("调研一下 pi 的插件生态")
+            Some("Fix the pi plugin loader")
         );
     }
 
@@ -640,12 +640,12 @@ mod tests {
             "\n",
             r#"{"type":"user","content":[{"type":"text","text":"<system-reminder>context</system-reminder>"}]}"#,
             "\n",
-            r#"{"type":"user","content":[{"type":"text","text":"<user_query>\n帮我优化这个查询\n</user_query>"}]}"#,
+            r#"{"type":"user","content":[{"type":"text","text":"<user_query>\nRefactor this query helper\n</user_query>"}]}"#,
             "\n",
         );
         assert_eq!(
             first_prompt("grok", jsonl).as_deref(),
-            Some("帮我优化这个查询")
+            Some("Refactor this query helper")
         );
     }
 
@@ -694,7 +694,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             part_b.join("prt_1.json"),
-            r#"{"id":"prt_1","messageID":"msg_b","type":"text","text":"帮我看下"}"#,
+            r#"{"id":"prt_1","messageID":"msg_b","type":"text","text":"Inspect the cache hit rate"}"#,
         )
         .unwrap();
         std::fs::write(
@@ -708,6 +708,6 @@ mod tests {
         env::remove_var("XDG_DATA_HOME");
         std::fs::remove_dir_all(&root).ok();
 
-        assert_eq!(prompt.as_deref(), Some("帮我看下"));
+        assert_eq!(prompt.as_deref(), Some("Inspect the cache hit rate"));
     }
 }

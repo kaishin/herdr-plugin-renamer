@@ -55,112 +55,119 @@ pub fn fallback_from_prompt(prompt: &str) -> String {
 }
 
 const DISPLAY_MAX_CHARS: usize = 24;
-const ZH_DISPLAY_MAX_CHARS: usize = 12;
+const EN_NAME_MAX_CHARS: usize = 32;
 
-/// A display name for pane/tab/agent labels when every naming engine failed.
-/// Prefers a compact Chinese topic when the prompt has hanzi (zh style and
-/// mixed prompts); otherwise falls back to an ASCII kebab slug. Labels can
-/// carry the original script; git branches still use `fallback_from_prompt`.
-pub fn display_fallback(prompt: &str) -> String {
-    let first_line = prompt.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-    if first_line.chars().any(is_cjk) {
-        let zh = zh_display_fallback(first_line);
-        if !zh.is_empty() {
-            return zh;
-        }
+/// Capitalise the first ASCII letter of each kebab/snake segment and join with
+/// spaces. Used to derive a friendly Title Case label from a slug-only fallback
+/// (`phone-otp-login` -> `Phone Otp Login`). The output mirrors what the LLM
+/// engine is asked to produce directly; this helper is the deterministic
+/// recovery path when the engine only emits a slug. Exposed for the Foundation
+/// engine arm in `main::generate_name`.
+pub fn title_case(slug: &str) -> String {
+    slug.split(['-', '_'])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(c) if c.is_ascii_alphabetic() => {
+                    let mut word = c.to_ascii_uppercase().to_string();
+                    word.push_str(chars.as_str().to_ascii_lowercase().as_str());
+                    word
+                }
+                Some(c) => c.to_string(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Build a Title Case English label from the first non-empty prompt line as a
+/// fallback when every naming engine failed. Punctuation is collapsed to
+/// spaces, each word is capitalised, and the result is capped to
+/// `DISPLAY_MAX_CHARS`. Non-ASCII prompts and filler-only prompts (every
+/// input word is all-lowercase and there are several of them) are rejected
+/// because the Title Cased output would be misleading; the caller treats
+/// such results as no-ops and uses `agent-task` instead.
+fn en_display_fallback(line: &str) -> Option<String> {
+    let normalized: String = line
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c.is_whitespace() {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    let raw_words: Vec<&str> = normalized.split_whitespace().collect();
+    if raw_words.is_empty() {
+        return None;
     }
-    let ascii = fallback_from_prompt(prompt);
-    if ascii != "agent-task" {
-        return ascii;
+    // Out of scope for an English-only fork: if no word carries an ASCII
+    // letter, the prompt is non-ASCII (emoji, accented Latin, etc.) and the
+    // Title Cased output would be a single non-English glyph at best. Bail
+    // and let the caller use `agent-task`.
+    if !raw_words
+        .iter()
+        .any(|w| w.chars().any(|c| c.is_ascii_alphabetic()))
+    {
+        return None;
     }
-    let compact = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
-    let capped: String = compact.chars().take(DISPLAY_MAX_CHARS).collect();
+    if raw_words.len() >= 2
+        && raw_words.iter().all(|w| {
+            w.chars().any(|c| c.is_ascii_alphabetic()) && !w.chars().any(|c| c.is_ascii_uppercase())
+        })
+    {
+        return None;
+    }
+    let title_cased: Vec<String> = raw_words
+        .iter()
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(c) if c.is_ascii_alphabetic() => {
+                    let mut word = c.to_ascii_uppercase().to_string();
+                    word.push_str(chars.as_str().to_ascii_lowercase().as_str());
+                    word
+                }
+                Some(c) => c.to_string(),
+                None => String::new(),
+            }
+        })
+        .collect();
+    let title = title_cased.join(" ");
+    let capped: String = title.chars().take(DISPLAY_MAX_CHARS).collect();
+    let capped = capped.trim_end().to_string();
+    // English-only fork: if the Title Cased output carries any non-ASCII
+    // characters, the input was non-English and the result would be a
+    // misleading single non-English glyph or accented Latin. Caller falls
+    // back to `agent-task`.
+    if !capped.is_ascii() {
+        return None;
+    }
     if capped.is_empty() {
-        "agent-task".to_string()
+        None
     } else {
-        capped
+        Some(capped)
     }
 }
 
-/// Spoken-request fillers that add no topic signal in Chinese prompts.
-const ZH_FILLERS: &[&str] = &[
-    "帮我",
-    "帮忙",
-    "请你",
-    "麻烦",
-    "看一下",
-    "看下",
-    "看看",
-    "查一下",
-    "查下",
-    "检查一下",
-    "分析一下",
-    "说一下",
-    "讲一下",
-    "问一下",
-    "了解一下",
-    "研究一下",
-    "总结一下",
-    "请",
-    "一下",
-    "这个",
-    "那个",
-    "是否",
-    "如何",
-    "怎么",
-    "怎样",
-    "什么",
-    "为什么",
-    "有没有",
-    "能不能",
-    "可以",
-    "需要",
-];
-
-/// Build a short, scannable Chinese label from a prompt line: strip spoken
-/// fillers, keep CJK + useful Latin product tokens, cap to 12 chars.
-fn zh_display_fallback(line: &str) -> String {
-    let mut s = line.trim().to_string();
-    for filler in ZH_FILLERS {
-        s = s.replace(filler, "");
+/// A display name for pane/tab/agent labels when every naming engine failed.
+/// Builds a Title Case English label from the first non-empty prompt line;
+/// rejects filler-only or non-ASCII input and falls back to `agent-task` so
+/// the caller always gets something to write. Git branches still use
+/// `fallback_from_prompt`.
+pub fn display_fallback(prompt: &str) -> String {
+    let first_line = prompt.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    if let Some(en) = en_display_fallback(first_line) {
+        return en;
     }
-    // Keep hanzi, common CJK punctuation, and short ASCII product tokens
-    // (herdr, NewAPI, GitHub). Collapse other punctuation to nothing.
-    let mut out = String::new();
-    let mut prev_ascii_word = false;
-    for ch in s.chars() {
-        if is_cjk(ch) {
-            if prev_ascii_word && !out.is_empty() {
-                // no separator; Chinese compounds read fine against product names
-            }
-            out.push(ch);
-            prev_ascii_word = false;
-        } else if ch.is_ascii_alphanumeric() {
-            out.push(ch);
-            prev_ascii_word = true;
-        } else if matches!(ch, '·' | '—' | '-' | '_' | '/') {
-            if !out.is_empty() && !out.ends_with(ch) {
-                out.push(ch);
-            }
-            prev_ascii_word = false;
-        } else {
-            // drop spaces / other punctuation between Chinese clauses
-            prev_ascii_word = false;
-        }
-    }
-    // Trim leftover separators and collapse runs.
-    let compact: String = out
-        .split(['-', '_', '/', '·', '—'])
-        .filter(|p| !p.is_empty())
-        .collect::<Vec<_>>()
-        .join("");
-    let capped: String = compact.chars().take(ZH_DISPLAY_MAX_CHARS).collect();
-    capped.trim_matches(['-', '_', '/', '·', '—']).to_string()
+    "agent-task".to_string()
 }
 
 const INSTRUCTION_HEAD_CHARS: usize = 500;
 const INSTRUCTION_TAIL_CHARS: usize = 300;
-const NAME_MAX_CHARS: usize = 16;
 
 /// A head+tail excerpt of the prompt for the engine instruction. Long prompts
 /// are usually pasted context with the actual request at one end; a short
@@ -173,56 +180,30 @@ fn instruction_excerpt(prompt: &str) -> String {
     let head: String = prompt.chars().take(INSTRUCTION_HEAD_CHARS).collect();
     let tail_start = char_count.saturating_sub(INSTRUCTION_TAIL_CHARS);
     let tail: String = prompt.chars().skip(tail_start).collect();
-    format!("{head}\n\n[...中间省略...]\n\n{tail}")
+    format!("{head}\n\n[... middle omitted ...]\n\n{tail}")
 }
 
-/// Build the instruction handed to a CLI naming engine. `en` asks for the
-/// historical single kebab slug; `zh` asks for a Chinese label line plus an
-/// ASCII branch-slug line so labels can carry CJK while branches stay ASCII.
-pub fn engine_instruction(style: &str, prompt: &str) -> String {
+/// Build the instruction handed to a CLI naming engine. Asks for two lines
+/// so the visible label can carry natural-language copy while branches stay
+/// ASCII: line 1 is a Title Case English label; line 2 is the kebab-case
+/// git branch slug.
+pub fn engine_instruction(prompt: &str) -> String {
     let truncated = instruction_excerpt(prompt);
-    match style {
-        "zh" => format!(
-            "只输出两行，不要任何解释、引号、编号或多余文字。\n\
-             第一行：必须是中文（至少含一个汉字），4-12个字的清晰任务主题名。\n\
-             要求：名词短语，一眼能看懂在做什么；写「对象+动作/结果」，具体明确；\n\
-             去掉「帮我」「看下」「请」「一下」「如何」「怎么」等口语与疑问词；\n\
-             产品名/专有名词可保留原文夹在中文里（如 herdr、NewAPI、GitHub）。\n\
-             好例子：herdr标题位置统一 / NewAPI关闭DeepSeek / GitHub主页打造计划 / 今日工作进展\n\
-             坏例子：看下今天工作进展 / herdr-agent-5-agent / 帮我查一下 / 在吗\n\
-             禁止纯英文、禁止 kebab-case、禁止数字串/指标缩写（如 h1、yoy、1-2-3）。\n\
-             第二行：2-4个英文单词的小写 kebab-case git 分支名（只含字母数字和连字符），\n\
-             用可读的英文词，不要数字段。\n\
-             任务内容：\n\n{truncated}"
-        ),
-        _ => format!(
-            "Output only a short kebab-case git branch slug (2-4 words, lowercase, \
-             hyphens only, no prose, no quotes, no surrounding text) summarizing \
-             this coding task. Prefer real words over numbers or metric codes \
-             (avoid labels like 1-2-3-h1-yoy):\n\n{truncated}"
-        ),
-    }
-}
-
-/// True when `ch` is a CJK Unified Ideograph (common Chinese hanzi range used
-/// for zh labels). Keeps the check allocation-free and independent of locales.
-fn is_cjk(ch: char) -> bool {
-    matches!(ch,
-        '\u{4E00}'..='\u{9FFF}'   // CJK Unified Ideographs
-        | '\u{3400}'..='\u{4DBF}' // CJK Extension A
-        | '\u{F900}'..='\u{FAFF}' // CJK Compatibility Ideographs
+    format!(
+        "Output only two lines, no explanation, no quotes, no numbering, no extra text.\n\
+         Line 1: a short English Title Case label (1-4 words, ASCII letters and \
+         spaces only, no hyphens, no underscores, no leading/trailing spaces) \
+         describing what this coding task does. Write a noun phrase the user \
+         can read at a glance — \"object + action/result\" — concrete and specific. \
+         Strip filler words (\"help me\", \"please\", \"how to\", \"can you\", \"let's\"). \
+         Keep product/proper names verbatim (herdr, NewAPI, GitHub, OTP, API).\n\
+         Good examples: Storage / Phone OTP Login / Email Verification / OAuth Refresh Token / Cache Invalidation\n\
+         Bad examples: storage / phone-otp-login / 1-2-3-h1-yoy / help me with auth\n\
+         No kebab-case, no snake_case, no all-lowercase phrases, no metric codes.\n\
+         Line 2: a kebab-case git branch slug (2-4 lowercase English words, ASCII \
+         letters/digits and hyphens only, no numeric segments like 1-2-3-h1).\n\
+         Task content:\n\n{truncated}"
     )
-}
-
-/// A zh-mode display label must carry at least one hanzi. Pure ASCII / kebab
-/// output (common when a free model ignores the two-line format) is rejected
-/// so the engine chain can fall through to a prompt-based fallback.
-fn is_good_zh_name(name: &str) -> bool {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    trimmed.chars().any(is_cjk)
 }
 
 /// Reject digit-heavy or token-noise slugs that look like garbled metric dumps
@@ -260,46 +241,61 @@ fn is_good_slug(slug: &str) -> bool {
     true
 }
 
-/// Cap and strip quotes from a candidate display name line.
+/// Cap and strip quotes from a candidate display name line. Uses
+/// `EN_NAME_MAX_CHARS` so phrases like "OAuth Refresh Token" survive.
 fn clean_name_line(line: &str) -> String {
     line.trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c.is_whitespace())
         .chars()
-        .take(NAME_MAX_CHARS)
+        .take(EN_NAME_MAX_CHARS)
         .collect()
 }
 
-/// Pick the best Chinese label from engine stdout lines (tail-first, then a
-/// reverse scan so status banners do not win over a real name line).
-fn pick_zh_name(lines: &[&str]) -> Option<String> {
-    if lines.is_empty() {
-        return None;
+/// Quality gate for English Title Case labels. Rejects digit-only strings,
+/// kebab/snake leakage (`phone-otp-login`), and all-lowercase multi-word
+/// strings — the engine prompt already asks for Title Case, so anything else
+/// is a model that ignored the brief and the chain should advance.
+fn is_good_en_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.len() > EN_NAME_MAX_CHARS {
+        return false;
     }
-    // Prefer the conventional "name then slug" layout: second-to-last line.
-    if lines.len() >= 2 {
-        let candidate = clean_name_line(lines[lines.len() - 2]);
-        if is_good_zh_name(&candidate) {
-            return Some(candidate);
-        }
+    let stripped =
+        trimmed.trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c.is_whitespace());
+    if stripped.is_empty() {
+        return false;
     }
-    // Model sometimes emits only a Chinese line, or buries it above junk.
-    for line in lines.iter().rev() {
-        let candidate = clean_name_line(line);
-        if is_good_zh_name(&candidate) {
-            return Some(candidate);
-        }
+    if stripped.contains('-') || stripped.contains('_') {
+        return false;
     }
-    None
+    if !stripped.chars().any(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    if !stripped
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == ' ')
+    {
+        return false;
+    }
+    let words: Vec<&str> = stripped.split_whitespace().collect();
+    if words.len() >= 2
+        && !words
+            .iter()
+            .any(|w| w.chars().next().is_some_and(|c| c.is_ascii_uppercase()))
+    {
+        return false;
+    }
+    true
 }
 
-/// Parse a CLI engine's raw output into `(label name, branch slug)` for the
-/// given style. `en` keeps the historical behavior (last non-empty line,
-/// sanitized, used for both). `zh` expects a name line then a slug line, and
-/// degrades gracefully when the model returns only one of them.
+/// Parse a CLI engine's raw output into `(label, branch slug)`. Prefers the
+/// two-line "label then slug" layout; single-line input is treated as a slug
+/// only and Title Cased for the label so older prompt templates still work.
 ///
-/// Quality gates: zh labels must contain hanzi; slugs must not be digit-noise.
-/// Failures return `None` so the engine chain / local fallback can take over
-/// instead of writing garbled tab names like `1-2-3-6-h1-yoy`.
-pub fn parse_engine_output(style: &str, raw: &str, prompt: &str) -> Option<(String, String)> {
+/// Quality gates: en labels must look like Title Case English (no
+/// kebab/snake leakage, no all-lowercase multi-word); slugs must not be
+/// digit-noise. Failures return `None` so the engine chain / local fallback
+/// can take over instead of writing garbled tab names like `1-2-3-6-h1-yoy`.
+pub fn parse_engine_output(raw: &str) -> Option<(String, String)> {
     let lines: Vec<&str> = raw
         .lines()
         .map(|l| l.trim())
@@ -307,26 +303,30 @@ pub fn parse_engine_output(style: &str, raw: &str, prompt: &str) -> Option<(Stri
         .collect();
     let last = *lines.last()?;
 
-    if style != "zh" {
-        let slug = sanitize(last);
-        if slug.is_empty() || !is_good_slug(&slug) {
-            return None;
+    // Try the two-line "label then slug" layout first. A clean label and a
+    // good slug together are the strongest signal of a well-behaved engine.
+    if lines.len() >= 2 {
+        let label_candidate = clean_name_line(lines[lines.len() - 2]);
+        let slug_candidate = sanitize(last);
+        if is_good_en_name(&label_candidate)
+            && !slug_candidate.is_empty()
+            && is_good_slug(&slug_candidate)
+        {
+            return Some((label_candidate, slug_candidate));
         }
-        return Some((slug.clone(), slug));
     }
 
-    let name = pick_zh_name(&lines)?;
-    // Prefer the last line as the branch slug when it is clean ASCII; otherwise
-    // derive from the prompt so we never ship digit-noise as a branch name.
-    let mut slug = sanitize(last);
+    // Single-line legacy path: treat the line as the slug and Title Case it
+    // for the label.
+    let slug = sanitize(last);
     if slug.is_empty() || !is_good_slug(&slug) {
-        slug = fallback_from_prompt(prompt);
+        return None;
     }
-    // If the prompt-derived slug is still empty/noise, keep a stable default.
-    if slug.is_empty() || !is_good_slug(&slug) {
-        slug = "agent-task".to_string();
+    let label = clean_name_line(&title_case(&slug));
+    if !is_good_en_name(&label) {
+        return None;
     }
-    Some((name, slug))
+    Some((label, slug))
 }
 
 #[cfg(test)]
@@ -382,133 +382,106 @@ mod tests {
     }
 
     #[test]
-    fn display_fallback_prefers_ascii_slug() {
+    fn display_fallback_prefers_title_case_label() {
         assert_eq!(
             display_fallback("Add JWT auth to the API endpoints please"),
-            "add-jwt-auth-to-the-api"
+            "Add Jwt Auth To The Api"
         );
     }
 
     #[test]
-    fn display_fallback_strips_cjk_fillers() {
-        assert_eq!(display_fallback("帮我优化数据库查询"), "优化数据库查询");
-        assert_eq!(display_fallback("看下今天工作进展"), "今天工作进展");
-    }
-
-    #[test]
-    fn display_fallback_prefers_cjk_over_ascii_in_mixed_prompts() {
-        // Mixed prompts used to collapse to english kebab (herdr-agent-…) and
-        // hide the Chinese topic. Prefer a compact CJK label instead.
-        let name = display_fallback(
-            "看下 herdr 总结 为什么有的 Agent 标题总结在上面有的在下面 当前的 5 个 agent 就有差异",
-        );
-        assert!(name.chars().any(is_cjk), "expected CJK in {name}");
-        assert!(!name.contains("agent-5"));
-        assert!(name.chars().count() <= ZH_DISPLAY_MAX_CHARS);
-    }
-
-    #[test]
-    fn display_fallback_caps_long_cjk_prompts() {
-        let long = "这是一个非常长的中文提示词需要被截断".repeat(3);
-        assert_eq!(
-            display_fallback(&long).chars().count(),
-            ZH_DISPLAY_MAX_CHARS
-        );
+    fn display_fallback_returns_agent_task_for_non_ascii() {
+        // Non-ASCII prompts are out of scope for this fork: Title Case needs
+        // ASCII letters, so the deterministic fallback is `agent-task`.
+        assert_eq!(display_fallback("🦀🌍🎉"), "agent-task");
+        assert_eq!(display_fallback("αβγ"), "agent-task");
+        assert_eq!(display_fallback("héllo"), "agent-task");
     }
 
     #[test]
     fn display_fallback_never_empty() {
-        assert_eq!(display_fallback("!!!"), "!!!");
+        assert_eq!(display_fallback("!!!"), "agent-task");
         assert_eq!(display_fallback(""), "agent-task");
     }
 
     #[test]
-    fn parse_en_takes_last_line_for_both() {
-        let parsed = parse_engine_output("", "thinking...\nfix-db-index\n", "prompt");
+    fn display_fallback_skips_filler_only_prompts() {
+        // Pure filler ("help me with auth please") is all lowercase and would
+        // produce a misleading "Help Me With Auth Please" label; fall back
+        // to agent-task instead.
+        assert_eq!(display_fallback("help me with auth please"), "agent-task");
+    }
+
+    #[test]
+    fn parse_en_takes_title_case_label_and_kebab_slug() {
+        let parsed = parse_engine_output("thinking...\nPhone OTP Login\nphone-otp-login\n");
         assert_eq!(
             parsed,
-            Some(("fix-db-index".to_string(), "fix-db-index".to_string()))
+            Some(("Phone OTP Login".to_string(), "phone-otp-login".to_string()))
         );
-        assert!(parse_engine_output("", "！！！\n", "prompt").is_none());
     }
 
     #[test]
-    fn parse_zh_takes_name_then_slug() {
-        let parsed = parse_engine_output("zh", "优化数据库索引\nfix-db-index\n", "prompt");
+    fn parse_en_single_line_title_cases_the_slug() {
+        let parsed = parse_engine_output("fix-db-index\n");
         assert_eq!(
             parsed,
-            Some(("优化数据库索引".to_string(), "fix-db-index".to_string()))
+            Some(("Fix Db Index".to_string(), "fix-db-index".to_string()))
         );
     }
 
     #[test]
-    fn parse_zh_skips_leading_status_lines() {
-        let parsed = parse_engine_output("zh", "banner line\n优化数据库索引\nfix-db-index", "p");
-        assert_eq!(
-            parsed,
-            Some(("优化数据库索引".to_string(), "fix-db-index".to_string()))
-        );
-    }
-
-    #[test]
-    fn parse_zh_single_line_derives_slug_from_prompt() {
-        let parsed = parse_engine_output("zh", "优化数据库索引", "Fix db index issue");
-        assert_eq!(
-            parsed,
-            Some((
-                "优化数据库索引".to_string(),
-                "fix-db-index-issue".to_string()
-            ))
-        );
-    }
-
-    #[test]
-    fn parse_zh_strips_quotes_and_caps_name() {
-        let parsed = parse_engine_output(
-            "zh",
-            "\"很长的中文任务名称超过十六个字会被截断掉\"\nlong-name",
-            "p",
-        );
-        let (name, slug) = parsed.unwrap();
-        assert_eq!(name.chars().count(), 16);
-        assert_eq!(slug, "long-name");
-    }
-
-    #[test]
-    fn parse_zh_rejects_ascii_only_output() {
-        // Free models often ignore the zh two-line format and emit only a
-        // kebab slug. That must not become the tab label.
-        assert!(parse_engine_output("zh", "1-2-3-6-h1-yoy\n", "美团增长调研").is_none());
-        assert!(parse_engine_output("zh", "hr-hris-1-ai-2-ai", "招聘AI调研").is_none());
-        assert!(
-            parse_engine_output("zh", "claude-code-linux-do-v2ex-x\n", "按平台改写宣传帖")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn parse_zh_finds_cjk_name_above_junk_slug() {
-        let prompt = "美团平台拉新唤醒用户增长调研";
-        let parsed = parse_engine_output(
-            "zh",
-            "thinking...\n美团拉新增长调研\n1-2-3-6-h1-yoy\n",
-            prompt,
-        );
-        let (name, slug) = parsed.unwrap();
-        assert_eq!(name, "美团拉新增长调研");
-        // Digit-noise last line is discarded; CJK prompt yields the local default.
-        assert_eq!(slug, "agent-task");
-        assert!(!slug.contains("1-2-3"));
+    fn parse_en_rejects_punctuation_only_label() {
+        assert!(parse_engine_output("！！！\n").is_none());
     }
 
     #[test]
     fn parse_en_rejects_digit_noise_slugs() {
-        assert!(parse_engine_output("", "1-2-3-6-h1-yoy\n", "prompt").is_none());
-        assert!(parse_engine_output("", "1\n", "prompt").is_none());
+        assert!(parse_engine_output("1-2-3-6-h1-yoy\n").is_none());
+        assert!(parse_engine_output("1\n").is_none());
         assert_eq!(
-            parse_engine_output("", "fix-db-index\n", "prompt"),
-            Some(("fix-db-index".to_string(), "fix-db-index".to_string()))
+            parse_engine_output("fix-db-index\n"),
+            Some(("Fix Db Index".to_string(), "fix-db-index".to_string()))
         );
+    }
+
+    #[test]
+    fn parse_en_two_line_kebab_label_falls_through_to_slug_recovery() {
+        // The engine ignored the brief and emitted a kebab for both lines.
+        // The two-line check rejects the kebab-shaped label, so the parser
+        // falls through to the single-line legacy path: treat the last line
+        // as the slug and Title Case it for the label. This is the same
+        // outcome as the single-line input — we still get a usable pair.
+        assert_eq!(
+            parse_engine_output("phone-otp-login\nphone-otp-login\n"),
+            Some(("Phone Otp Login".to_string(), "phone-otp-login".to_string()))
+        );
+    }
+
+    #[test]
+    fn title_case_handles_kebab_and_snake() {
+        assert_eq!(title_case("phone-otp-login"), "Phone Otp Login");
+        assert_eq!(title_case("fix_db_index"), "Fix Db Index");
+        assert_eq!(title_case("storage"), "Storage");
+        assert_eq!(title_case(""), "");
+    }
+
+    #[test]
+    fn is_good_en_name_accepts_title_case() {
+        assert!(is_good_en_name("Phone OTP Login"));
+        assert!(is_good_en_name("Storage"));
+        assert!(is_good_en_name("OAuth Refresh Token"));
+        assert!(is_good_en_name("Cache Invalidation"));
+    }
+
+    #[test]
+    fn is_good_en_name_rejects_kebab_and_noise() {
+        assert!(!is_good_en_name("phone-otp-login"));
+        assert!(!is_good_en_name("phone_otp_login"));
+        assert!(!is_good_en_name("storage layer"));
+        assert!(!is_good_en_name(""));
+        assert!(!is_good_en_name("1-2-3"));
+        assert!(!is_good_en_name("!!!"));
     }
 
     #[test]

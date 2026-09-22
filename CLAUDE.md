@@ -21,24 +21,28 @@ Single binary, two phases (`src/main.rs`):
   The generated name is also reported as the `task` metadata token on the pane
   and workspace for custom Agent and Space sidebar rows.
   With the default `tab` target on a non-linked workspace, the **title is
-  written to `workspace`** (herdr 0.7.4's only bright Agent-sidebar token) and
-  the **tab gets the cwd folder basename** (dim). Linked worktrees skip that
-  title-on-workspace step so the later branch-slug rename can own the label.
-  Multi-tab siblings share one workspace label (last writer wins).
+  written to the tab itself** (and mirrored to the pane label and the Agent
+  sidebar's visible name via `--display-agent`); the system agent name stays
+  as the ASCII slug because herdr's agent-name regex rejects spaces and
+  uppercase letters. The workspace keeps its existing label so multi-tab
+  siblings no longer clobber each other. Linked worktrees skip the title-on-
+  tab step so the later branch-slug rename can own the workspace label.
   If the pane is in a linked worktree whose current branch starts with
   `worktree/`, `git::rename_current_branch` renames it to `<prefix>/<slug>` and
   only then `herdr::workspace_rename` renames the workspace to `<slug>`.
 
-Naming outputs: title on workspace (non-worktree); folder on tab; optional
-pane/agent renames via `targets`; `$task` metadata always. Branch
-`<prefix>/<slug>` (bare `<slug>` when no prefix); workspace `<slug>` after a
-successful worktree branch rename. The prefix comes from
+Naming outputs: natural-language label on tab (default), pane, and Agent
+sidebar `--display-agent`; ASCII slug on the system agent name, git branch,
+and worktree workspace. CLI engines return a Title Case English label plus
+an ASCII kebab-case slug (two lines). The label is also published as `$task`
+metadata so users can render it in custom Agent and Space sidebar rows.
+Branch `<prefix>/<slug>` (bare `<slug>` when no prefix); workspace `<slug>`
+after a successful worktree branch rename. The prefix comes from
 `main::resolve_branch_prefix`: `HERDR_NAMING_BRANCH_PREFIX` env, then a
 `branch-prefix` file in `HERDR_PLUGIN_CONFIG_DIR`, else none.
 
-`zh` style: CLI engines return a Chinese label + ASCII slug; local fallback
-prefers a compact CJK topic (strips spoken fillers) over ASCII kebab when the
-prompt has hanzi.
+The local fallback Title Cases the first prompt line; non-ASCII prompts
+fall through to `agent-task` since this fork is English-only.
 
 Foundation-generated slugs should be compact noun-topic labels, not literal
 sentence summaries. Prefer labels such as `current-file` over
@@ -214,9 +218,14 @@ This fork diverges from the upstream doc above in these ways:
   agents and defaults to pi → opencode; Claude, Codex, and Foundation remain
   explicit opt-ins. Engine knobs resolve env-first, then a same-named file in
   `HERDR_PLUGIN_CONFIG_DIR`.
-- Styles: `style` knob `en`|`zh`. CLI engines receive a style-built two-line
-  instruction (`zh`: Chinese label + ASCII slug) and return raw output parsed
-  by `slug::parse_engine_output`. Foundation stays ASCII-only.
+- Labels: a single two-line instruction asks CLI engines for a Title Case
+  English label plus an ASCII kebab-case slug. `slug::parse_engine_output`
+  accepts both the two-line layout and the single-line legacy shape (slug
+  only; the label is then Title Cased from the slug). The Foundation engine
+  is ASCII-only, so `generate_name` derives its label by Title Casing the
+  slug. The natural-language label rides to the Agent sidebar via
+  `herdr::pane_report_display_agent` (`pane report-metadata --display-agent`)
+  since herdr's `agent rename` regex forbids spaces and uppercase letters.
 - Targets: `targets` knob (default `tab`) selects pane/tab/agent renames.
 - Idempotence is session-scoped, not pane-scoped: the done marker stores the
   named session id and is checked in the cold phase, so new sessions in a

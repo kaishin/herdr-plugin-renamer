@@ -193,17 +193,13 @@ fn cold_phase() {
     // agent are herdr-API extras that default on and can be trimmed via the
     // `targets` knob. Each failure is logged and non-fatal.
     //
-    // Title placement (herdr 0.7.4 color rules):
-    //   - `workspace` is the only bright/bold Agent-sidebar token (text+bold).
-    //   - `tab` / `agent` / `pane` / `$task` all paint dim overlay0 (gray).
-    //   - Per-token style maps (`{ token, fg, bold, dim }`) are not accepted
-    //     by 0.7.4 config, so `$task` cannot be forced white on this release.
-    // Therefore the Chinese title always goes on `workspace` (top, white),
-    // and the tab gets the folder basename (second row, dim). Linked worktrees
-    // skip the title workspace rename so the later branch-slug rename wins.
-    // Note: multi-tab siblings share one workspace label (last writer wins).
+    // Fork behavior (kaishin): the title goes on the TAB itself. Upstream put
+    // it on the workspace because that was the only bright/bold Agent-sidebar
+    // token on herdr 0.7.4, but multi-tab siblings share one workspace label
+    // (last writer wins). Per-tab titles clobber nothing. The workspace keeps
+    // its name; linked worktrees still get the branch-slug workspace rename
+    // in the worktree block below.
     let targets = resolve_targets();
-    let folder = folder_label(snapshot.cwd.as_deref());
     if targets.iter().any(|t| t == "pane") {
         let ok = herdr::pane_rename(&pane_id, &name);
         debug_log(&format!("cold: pane {pane_id} -> {name} ok={ok}"));
@@ -211,19 +207,9 @@ fn cold_phase() {
     if targets.iter().any(|t| t == "tab") {
         match snapshot.tab_id.as_deref() {
             Some(tab_id) => {
-                if !is_linked_worktree {
-                    let ws_ok = herdr::workspace_rename(&workspace_id, &name);
-                    debug_log(&format!(
-                        "cold: title-on-workspace (bright) ws={workspace_id}->{name} ok={ws_ok}"
-                    ));
-                } else {
-                    debug_log(
-                        "cold: skip title workspace rename (linked worktree keeps slug path)",
-                    );
-                }
-                let tab_ok = herdr::tab_rename(tab_id, &folder);
+                let tab_ok = herdr::tab_rename(tab_id, &name);
                 debug_log(&format!(
-                    "cold: tab {tab_id}->{folder} ok={tab_ok} (folder on dim row)"
+                    "cold: tab {tab_id}->{name} ok={tab_ok} (title on tab)"
                 ));
             }
             None => debug_log("cold: skip tab rename, no tab_id in snapshot"),
@@ -431,6 +417,9 @@ fn pane_suffix(pane_id: &str) -> String {
 }
 
 /// Basename of the pane cwd for the dim folder label on the tab row.
+/// Unused since the fork moved the title onto the tab; kept for the tests
+/// and a possible future folder-as-fallback knob.
+#[allow(dead_code)]
 fn folder_label(cwd: Option<&str>) -> String {
     let path = cwd.unwrap_or("").trim_end_matches('/');
     if path.is_empty() {
